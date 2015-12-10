@@ -1,8 +1,9 @@
 #include<stdlib.h>
+#include <ctime>
 #include<math.h>
 #include"mpi.h"
 
-#define MATRIX_SIZE 6
+#define MATRIX_SIZE 3000
 
 int first_matrix[MATRIX_SIZE][MATRIX_SIZE];
 int second_matrix[MATRIX_SIZE][MATRIX_SIZE];
@@ -49,18 +50,14 @@ void GridSetup(GridStructure *grid) {
     MPI_Cart_sub(grid->grid_comm, free_coords, &(grid->col_comm));
 }
 void MultiplyLocal(int **a, int **b, int **c, int size) {
-    int **temp = (int **) malloc(size * sizeof(int *));
-    for (int i = 0; i < size; i++)
-        *(temp + i) = (int *) malloc(size * sizeof(int));
+    int temp = 0;
     for (int i = 0; i < size; i++)
         for (int j = 0; j < size; j++) {
-            temp[i][j] = 0;
+            temp = 0;
             for (int k = 0; k < size; k++)
-                temp[i][j] += (a[i][k] * b[k][j]);
+                temp += (a[i][k] * b[k][j]);
+            c[i][j] += temp;
         }
-    for (int i = 0; i < size; i++)
-        for (int j = 0; j < size; j++)
-            c[i][j] += temp[i][j];
 }
 void UnpackMatrix(int *buff, int **a, int size) {
     int k = 0;
@@ -105,18 +102,12 @@ void PrintPackedMatrix(int *matrix, int size) {
     }
 }
 void GenerateMatrices() {
-    int z = 0;
     for (int i = 0; i < MATRIX_SIZE; i++)
         for (int j = 0; j < MATRIX_SIZE; j++) {
             first_matrix[i][j] = rand() % 100;//(i==j) ? 1 : 0;
-            z++;
-        }
-    z = 0;
-    for (int i = 0; i < MATRIX_SIZE; i++)
-        for (int j = 0; j < MATRIX_SIZE; j++) {
             second_matrix[i][j] = rand() % 100;
-            z++;
         }
+
 }
 
 void FoxMultiply(int n, GridStructure *grid, int **a, int **b, int **c) {
@@ -125,9 +116,9 @@ void FoxMultiply(int n, GridStructure *grid, int **a, int **b, int **c) {
 
     submat_dim = n / grid->dim;
 
-    temp_a = new int*[MATRIX_SIZE];
-    for(int i = 0; i < MATRIX_SIZE; ++i)
-        temp_a[i] = new int[MATRIX_SIZE];
+    temp_a = new int*[submat_dim];
+    for(int i = 0; i < submat_dim; ++i)
+        temp_a[i] = new int[submat_dim];
     for (int i = 0; i < submat_dim; i++)
         for (int j = 0; j < submat_dim; j++)
             temp_a[i][j] = 0;
@@ -158,7 +149,7 @@ void FoxMultiply(int n, GridStructure *grid, int **a, int **b, int **c) {
     }
 }
 
-void TestSingleThread()
+int** TestSingleThread()
 {
     int **test_result, **test_a, **test_b;
     test_a = new int*[MATRIX_SIZE];
@@ -177,19 +168,25 @@ void TestSingleThread()
         }
     MultiplyLocal(test_a, test_b, test_result, MATRIX_SIZE);
 
-    std::cout << "Local result:" << std::endl;
-    PrintMatrix(test_result, MATRIX_SIZE);
+    //std::cout << "Local result:" << std::endl;
+    //PrintMatrix(test_result, MATRIX_SIZE);
+    return test_result;
 }
+
 
 int main(int argc, char *argv[]) {
     int block_size;
     int **local_a, **local_b, **local_c;
+    clock_t start,finish;
     MPI_Init(&argc, &argv);
 
     GridStructure grid;
     GridSetup(&grid);
     GenerateMatrices();
+
     block_size = MATRIX_SIZE / grid.dim;
+    int base_row = grid.row * block_size;
+    int base_col = grid.col * block_size;
 
     local_a = new int*[MATRIX_SIZE];
     local_b = new int*[MATRIX_SIZE];
@@ -200,10 +197,6 @@ int main(int argc, char *argv[]) {
         local_b[i] = new int[MATRIX_SIZE];
         local_c[i] = new int[MATRIX_SIZE];
     }
-
-    int base_row = grid.row * block_size;
-    int base_col = grid.col * block_size;
-
     for (int i = base_row; i < base_row + block_size; i++)
         for (int j = base_col; j < base_col + block_size; j++) {
             local_a[i - (base_row)][j - (base_col)] = first_matrix[i][j];
@@ -211,9 +204,24 @@ int main(int argc, char *argv[]) {
             local_c[i - (base_row)][j - (base_col)] = 0;
         }
 
+    if (grid.rank == 0)
+    {
+        std::cout<<"Ready..." <<std::endl;
+    }
+
     MPI_Barrier(grid.grid_comm);
+    if (grid.rank == 0)
+    {
+        start = clock();
+    }
     FoxMultiply(MATRIX_SIZE, &grid, local_a, local_b, local_c);
     MPI_Barrier(grid.grid_comm);
+    if (grid.rank == 0)
+    {
+        finish = clock();
+        clock_t result_time = finish - start;
+        std::cout << "Time: " << double(result_time)/CLOCKS_PER_SEC << std::endl;
+    }
 
     int *result_buff = new int[MATRIX_SIZE * MATRIX_SIZE];
     int *local_buff = new int[block_size * block_size];
@@ -232,10 +240,20 @@ int main(int argc, char *argv[]) {
                         k++;
                     }
 
-        std::cout << "Fox result:" << std::endl;
-        PrintPackedMatrix(data, MATRIX_SIZE);
+        std::cout << "Fox result check:";
 
-        TestSingleThread();
+        //PrintPackedMatrix(data, MATRIX_SIZE);
+        int ** res = TestSingleThread();
+        for(int i=0;i<MATRIX_SIZE;i++)
+            for(int j=0;j<MATRIX_SIZE;j++)
+            {
+                if(res[i][j]!=data[i*MATRIX_SIZE+j])
+                {
+                    std::cout << "ERROR!" <<std::endl;
+                    exit(1);
+                }
+            }
+        std::cout << "OK" << std::endl;
     }
 
     MPI_Finalize();
